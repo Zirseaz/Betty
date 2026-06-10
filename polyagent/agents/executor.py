@@ -11,11 +11,13 @@ from sqlalchemy import select
 from polyagent.agents.base import BaseAgent
 from polyagent.clients.polymarket import PolymarketClient
 from polyagent.config import Settings
+import asyncio
 from polyagent.models import (
     Order, OrderSide, OrderStatus, OrderType,
-    Position, PositionStatus, Trade, Signal, SignalStatus
+    Position, PositionStatus, Trade, Signal, SignalStatus, Market
 )
 from polyagent.notifications.telegram import TelegramNotifier
+from polyagent.api.clob_ws import get_global_cache
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +28,14 @@ class ExecutorAgent(BaseAgent):
     name = "ExecutorAgent"
 
     def __init__(self, settings: Settings) -> None:
-        super().__init__(settings, interval_seconds=15)
+        super().__init__(settings, interval_seconds=10)
         self.client = PolymarketClient(settings)
         self.notifier = TelegramNotifier(settings)
+        self.ws_cache = get_global_cache(settings)
 
     async def setup(self) -> None:
         await super().setup()
+        await self.ws_cache.start()
         # Subscribe to approved trading signals from Risk Manager
         self.subscribe_to("signal_approved", self.on_signal_approved)
         if self.settings.is_paper:
@@ -39,6 +43,7 @@ class ExecutorAgent(BaseAgent):
         await self.log_action("started")
 
     async def teardown(self) -> None:
+        await self.ws_cache.stop()
         await self.client.close()
         await self.log_action("stopped")
         await super().teardown()
@@ -69,6 +74,17 @@ class ExecutorAgent(BaseAgent):
                 logger.error("[%s] Approved signal %s not found in DB", self.name, signal_id)
                 return
 
+            # Check expiration TTL
+            if signal.expires_at and datetime.now(timezone.utc) > signal.expires_at:
+                logger.warning("[%s] Signal %s has EXPIRED. Discarding.", self.name, signal_id)
+                signal.status = SignalStatus.EXPIRED
+                await session.commit()
+                return
+
+            if signal.status != SignalStatus.PENDING:
+                logger.warning("[%s] Signal %s is %s, skipping.", self.name, signal_id, signal.status)
+                return
+
         try:
             if signal_type == "internal_arb":
                 # Multi-leg binary arb: BUY YES and BUY NO
@@ -88,9 +104,10 @@ class ExecutorAgent(BaseAgent):
         except Exception as e:
             logger.error("[%s] Execution failed for signal %s: %s", self.name, signal_id, e, exc_info=True)
             async with self._session_factory() as session:
-                session.add(signal)
-                signal.status = SignalStatus.REJECTED
-                await session.commit()
+                sig = await session.get(Signal, signal_id)
+                if sig:
+                    sig.status = SignalStatus.REJECTED
+                    await session.commit()
 
     async def _execute_standard_trade(
         self, signal: Signal, token_id: str, target_price: float, side: str, approved_size_usd: float, question: str
@@ -101,6 +118,22 @@ class ExecutorAgent(BaseAgent):
         
         # In live mode we use GTC (maker) to avoid high taker fees; in paper mode, we simulate immediately
         order_type = "GTC"
+        # WS Cache Re-validation
+        yes_token = token_id # Simplified mapping for example context
+        no_token = token_id # Simplified mapping for example context
+        yes_price = self.ws_cache.get_best_ask(yes_token)
+        no_price = self.ws_cache.get_best_ask(no_token)
+        
+        if yes_price > 0 and no_price > 0:
+            current_sum = yes_price + no_price
+            if current_sum >= 1.0:
+                logger.warning("[%s] Arb window closed (sum: %.4f). Cancelling execution.", self.name, current_sum)
+                async with self._session_factory() as session:
+                    sig = await session.get(Signal, signal.id)
+                    if sig:
+                        sig.status = SignalStatus.REJECTED
+                    await session.commit()
+                return
         
         # Place order via PolymarketClient wrapper
         loop = asyncio.get_running_loop()
@@ -133,7 +166,9 @@ class ExecutorAgent(BaseAgent):
                 fill_size = receipt.get("filled", shares)
                 
                 await self._process_fill(session, db_order, fill_price, fill_size, "statistical")
-                signal.status = SignalStatus.EXECUTED
+                sig = await session.get(Signal, signal.id)
+                if sig:
+                    sig.status = SignalStatus.EXECUTED
                 
                 # Send Telegram fill notification
                 await self.notifier.send_trade(
@@ -141,7 +176,9 @@ class ExecutorAgent(BaseAgent):
                     question=question, strategy="statistical", order_id=order_id or "simulated"
                 )
             else:
-                signal.status = SignalStatus.PENDING
+                sig = await session.get(Signal, signal.id)
+                if sig:
+                    sig.status = SignalStatus.PENDING
 
             await session.commit()
 
@@ -211,7 +248,9 @@ class ExecutorAgent(BaseAgent):
                 await self._process_fill(session, yes_order, yes_receipt.get("fill_price"), yes_receipt.get("filled"), "internal_arb")
                 await self._process_fill(session, no_order, no_receipt.get("fill_price"), no_receipt.get("filled"), "internal_arb")
                 
-                signal.status = SignalStatus.EXECUTED
+                sig = await session.get(Signal, signal.id)
+                if sig:
+                    sig.status = SignalStatus.EXECUTED
                 
                 # Notify Telegram
                 await self.notifier.send_trade(
@@ -220,7 +259,9 @@ class ExecutorAgent(BaseAgent):
                 )
             else:
                 logger.warning("[%s] Arbitrage execution failed. YES=%s, NO=%s. Reverting.", self.name, yes_status, no_status)
-                signal.status = SignalStatus.REJECTED
+                sig = await session.get(Signal, signal.id)
+                if sig:
+                    sig.status = SignalStatus.REJECTED
                 
                 # If one leg filled but not the other, we are in a bad state (legacy tail risk). Cancel the open one.
                 if yes_status == "FILLED" and no_status != "FILLED":
@@ -286,11 +327,15 @@ class ExecutorAgent(BaseAgent):
                 logger.info("[%s] All negative risk legs filled successfully!", self.name)
                 for db_order, receipt, _, alloc in db_orders:
                     await self._process_fill(session, db_order, receipt.get("fill_price"), receipt.get("filled"), "negative_risk")
-                signal.status = SignalStatus.EXECUTED
+                sig = await session.get(Signal, signal.id)
+                if sig:
+                    sig.status = SignalStatus.EXECUTED
                 await self.notifier.send_alert(f"Negative risk arbitrage successfully executed on: {question}", level="INFO")
             else:
                 logger.warning("[%s] Negative risk execution failed or was incomplete.", self.name)
-                signal.status = SignalStatus.REJECTED
+                sig = await session.get(Signal, signal.id)
+                if sig:
+                    sig.status = SignalStatus.REJECTED
                 # Log critical alert if we got filled on some legs but not all (unhedged exposure)
                 filled_count = sum(1 for _, _, ok, _ in db_orders if ok)
                 if filled_count > 0:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import select
 
 from polyagent.agents.base import BaseAgent
@@ -14,6 +14,7 @@ from polyagent.models import Market, MarketStatus, Signal, SignalType, SignalSta
 from polyagent.signals.price import detect_price_discrepancy
 from polyagent.signals.orderbook import detect_orderbook_imbalance
 from polyagent.signals.volume import detect_volume_spike
+from polyagent.api.clob_ws import get_global_cache
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +32,15 @@ class ScannerAgent(BaseAgent):
         # Default to 30 second scan interval or from settings
         super().__init__(settings, interval_seconds=settings.scan_interval_seconds)
         self.client = PolymarketClient(settings)
+        self.ws_cache = get_global_cache(settings)
 
     async def setup(self) -> None:
         await super().setup()
+        await self.ws_cache.start()
         await self.log_action("started", {"interval": self.interval})
 
     async def teardown(self) -> None:
+        await self.ws_cache.stop()
         await self.client.close()
         await self.log_action("stopped")
         await super().teardown()
@@ -90,22 +94,21 @@ class ScannerAgent(BaseAgent):
 
                 if not yes_token_id or not no_token_id:
                     continue
+                    
+                # Subscribe to the WebSocket for real-time order books
+                await self.ws_cache.subscribe([yes_token_id, no_token_id])
 
                 # Query database for existing market
                 stmt = select(Market).where(Market.condition_id == condition_id)
                 res = await session.execute(stmt)
                 market = res.scalar_one_or_none()
 
-                # Get prices from CLOB
-                yes_price = 0.0
-                no_price = 0.0
-                try:
-                    # Async calls to fetch midpoint prices
-                    yes_price = await self.client.get_midpoint_async(yes_token_id)
-                    no_price = await self.client.get_midpoint_async(no_token_id)
-                except Exception as e:
-                    logger.debug("Failed to get prices for condition %s: %s", condition_id, e)
-                    # Fallback to Gamma prices if CLOB fails
+                # Get prices from WS Cache
+                yes_price = self.ws_cache.get_midpoint(yes_token_id)
+                no_price = self.ws_cache.get_midpoint(no_token_id)
+                
+                if yes_price <= 0.0 or no_price <= 0.0:
+                    # Fallback to Gamma prices if WS is empty
                     outcome_prices = raw_m.get("outcomePrices")
                     if isinstance(outcome_prices, list) and len(outcome_prices) >= 2:
                         try:
@@ -132,6 +135,9 @@ class ScannerAgent(BaseAgent):
                         status=MarketStatus.ACTIVE,
                     )
                     session.add(market)
+                    # Flush immediately so market.id is assigned before any
+                    # Signal(market_id=market.id) is created below.
+                    await session.flush()
                     logger.info("[%s] Adding new market: %s", self.name, question[:50])
                 else:
                     market.yes_price = yes_price
@@ -161,6 +167,7 @@ class ScannerAgent(BaseAgent):
                             "no_token_id": no_token_id,
                         }),
                         status=SignalStatus.PENDING,
+                        expires_at=datetime.now(timezone.utc) + timedelta(seconds=10)
                     )
                     session.add(signal)
                     signal_count += 1

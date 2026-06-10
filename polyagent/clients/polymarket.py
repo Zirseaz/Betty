@@ -14,15 +14,9 @@ import uuid
 from enum import Enum
 from typing import Any
 
-import httpx
-import urllib3
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType as ClobOrderType
-from py_clob_client.http_helpers import helpers as clob_helpers
-
-# Disable SSL verification for local dev
-clob_helpers._http_client = httpx.Client(http2=True, verify=False)
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType as ClobOrderType
+from py_clob_client.order_builder.constants import BUY, SELL
 
 from polyagent.clients.gamma import GammaClient
 from polyagent.config import Settings
@@ -57,6 +51,11 @@ def _order_type_to_clob(order_type: str) -> ClobOrderType:
     return mapping.get(order_type.upper(), ClobOrderType.GTC)
 
 
+def _side_to_clob(side: str) -> str:
+    """Map a human-readable side string to the py-clob-client constant."""
+    return BUY if side.upper() == "BUY" else SELL
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Main client
 # ──────────────────────────────────────────────────────────────────────
@@ -82,14 +81,21 @@ class PolymarketClient:
         # ── CLOB (sync via py-clob-client) ──────────────────────────
         self._clob: ClobClient | None = None
         if not self._paper_mode:
-            api_key = settings.poly_api_key or ""
-            api_secret = settings.poly_api_secret or ""
-            passphrase = settings.poly_api_passphrase or ""
+            private_key = settings.poly_private_key or ""
+            if not private_key:
+                raise RuntimeError(
+                    "LIVE mode requires a wallet private key (poly_private_key) "
+                    "to sign transactions"
+                )
+            api_creds = ApiCreds(
+                api_key=settings.poly_api_key or "",
+                api_secret=settings.poly_api_secret or "",
+                api_passphrase=settings.poly_api_passphrase or "",
+            )
             self._clob = ClobClient(
                 self.CLOB_BASE,
-                key=api_key,
-                secret=api_secret,
-                passphrase=passphrase,
+                key=private_key,  # wallet private key used for signing
+                creds=api_creds,
                 chain_id=137,  # Polygon mainnet
             )
             logger.info("PolymarketClient initialised in LIVE mode")
@@ -462,9 +468,10 @@ class PolymarketClient:
                 token_id=token_id,
                 price=price,
                 size=size,
+                side=_side_to_clob(side),
             )
             clob_ot = _order_type_to_clob(order_type)
-            signed = clob.create_and_post_order(order_args)
+            signed = clob.create_and_post_order(order_args, order_type=clob_ot)
             logger.info(
                 "[LIVE] Order placed: side=%s token=%s price=%.4f size=%.2f type=%s result=%s",
                 side, token_id, price, size, order_type, signed,

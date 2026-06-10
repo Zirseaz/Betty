@@ -7,6 +7,8 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
+
+import httpx
 from sqlalchemy import select
 
 from polyagent.agents.base import BaseAgent
@@ -250,7 +252,7 @@ class AnalystAgent(BaseAgent):
         )
 
         provider = self.settings.llm_provider
-        
+
         if provider == LLMProvider.OPENAI:
             return await self._call_openai(system_prompt, user_prompt)
         elif provider == LLMProvider.LOCAL:
@@ -258,8 +260,25 @@ class AnalystAgent(BaseAgent):
             return await self._call_openai(system_prompt, user_prompt, base_url="http://localhost:11434/v1")
         elif provider == LLMProvider.DEEPSEEK:
             return await self._call_openai(system_prompt, user_prompt, base_url="https://api.deepseek.com", model="deepseek-chat")
-        else: # GEMINI
+
+        # Explicit Gemini support: only dispatch to Gemini if the Enum defines it
+        # and the configured provider matches. Do NOT silently assume Gemini.
+        gemini_member = getattr(LLMProvider, "GEMINI", None)
+        if gemini_member is not None and provider == gemini_member:
             return await self._call_gemini(system_prompt, user_prompt)
+
+        # Fallback: also accept providers whose value identifies as 'gemini'
+        # (covers Enum definitions where the member name differs).
+        provider_value = str(getattr(provider, "value", provider)).lower()
+        if provider_value == "gemini":
+            return await self._call_gemini(system_prompt, user_prompt)
+
+        logger.error(
+            "[%s] Unsupported LLM provider configured: %r. "
+            "Supported providers: OPENAI, LOCAL, DEEPSEEK, GEMINI.",
+            self.name, provider,
+        )
+        return None
 
     async def _call_openai(self, system_prompt: str, user_prompt: str, base_url: str | None = None, model: str = "gpt-4o-mini") -> dict[str, Any] | None:
         """Call OpenAI chat completion API."""
@@ -308,7 +327,7 @@ class AnalystAgent(BaseAgent):
         }
 
         try:
-            async with httpx.AsyncClient() as client:  # type: ignore[name-defined]
+            async with httpx.AsyncClient() as client:
                 resp = await client.post(url, json=payload, params=params, headers=headers, timeout=20.0)
                 resp.raise_for_status()
                 data = resp.json()
