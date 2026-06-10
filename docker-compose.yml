@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  polyagent:
+    build: .
+    container_name: polyagent
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///data/polyagent.db
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

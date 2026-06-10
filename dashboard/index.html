@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PolyAgent — Prediction Market Trading Terminal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="terminal-container">
+        <!-- HEADER -->
+        <header class="terminal-header">
+            <div class="brand">
+                <span class="logo-icon">⚡</span>
+                <div class="logo-text">
+                    <h1>POLY<span>AGENT</span></h1>
+                    <span class="subtitle">Autonomous Polymarket Quantitative Engine</span>
+                </div>
+            </div>
+            
+            <div class="header-controls">
+                <div class="status-indicator" id="ws-status">
+                    <span class="status-dot pulsing"></span>
+                    <span class="status-label">CONNECTING</span>
+                </div>
+                
+                <div class="badge mode-badge paper-mode" id="mode-badge">
+                    PAPER MODE
+                </div>
+                
+                <button class="btn btn-primary btn-pause" id="btn-pause">
+                    <span class="icon">⏸</span> <span class="label">PAUSE SYSTEM</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- MAIN LAYOUT GRID -->
+        <main class="terminal-grid">
+            
+            <!-- LEFT PANEL: METRICS & AGENTS -->
+            <div class="grid-col col-left">
+                <!-- PERFORMANCE CARD -->
+                <div class="card glass-card card-performance">
+                    <div class="card-header">
+                        <h2>Portfolio Metrics</h2>
+                    </div>
+                    <div class="card-body metrics-grid">
+                        <div class="metric-box">
+                            <span class="metric-title">Net P&L</span>
+                            <span class="metric-value positive" id="metric-pnl">$0.00</span>
+                        </div>
+                        <div class="metric-box">
+                            <span class="metric-title">Win Rate</span>
+                            <span class="metric-value" id="metric-winrate">0.0%</span>
+                        </div>
+                        <div class="metric-box">
+                            <span class="metric-title">Sharpe Ratio</span>
+                            <span class="metric-value" id="metric-sharpe">0.00</span>
+                        </div>
+                        <div class="metric-box">
+                            <span class="metric-title">Open Exposure</span>
+                            <span class="metric-value" id="metric-exposure">$0.00</span>
+                        </div>
+                        <div class="metric-box wide">
+                            <span class="metric-title">Paper Balance</span>
+                            <span class="metric-value highlight" id="metric-balance">$10,000.00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AGENT STATUS CARD -->
+                <div class="card glass-card card-agents">
+                    <div class="card-header">
+                        <h2>Agent Status</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="agent-list">
+                            <div class="agent-row" id="agent-scanner">
+                                <div class="agent-info">
+                                    <span class="agent-name">ScannerAgent</span>
+                                    <span class="agent-desc">Discovering markets & pricing</span>
+                                </div>
+                                <div class="agent-badge active">RUNNING</div>
+                            </div>
+                            <div class="agent-row" id="agent-analyst">
+                                <div class="agent-info">
+                                    <span class="agent-name">AnalystAgent</span>
+                                    <span class="agent-desc">Multi-persona LLM ensemble</span>
+                                </div>
+                                <div class="agent-badge active">RUNNING</div>
+                            </div>
+                            <div class="agent-row" id="agent-arbitrage">
+                                <div class="agent-info">
+                                    <span class="agent-name">ArbitrageAgent</span>
+                                    <span class="agent-desc">Arb & Negative Risk scanning</span>
+                                </div>
+                                <div class="agent-badge active">RUNNING</div>
+                            </div>
+                            <div class="agent-row" id="agent-risk_manager">
+                                <div class="agent-info">
+                                    <span class="agent-name">RiskManagerAgent</span>
+                                    <span class="agent-desc">Drawdown & sizing gates</span>
+                                </div>
+                                <div class="agent-badge active">RUNNING</div>
+                            </div>
+                            <div class="agent-row" id="agent-executor">
+                                <div class="agent-info">
+                                    <span class="agent-name">ExecutorAgent</span>
+                                    <span class="agent-desc">Order router & notification</span>
+                                </div>
+                                <div class="agent-badge active">RUNNING</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- PERFORMANCE CHART CARD -->
+                <div class="card glass-card card-chart">
+                    <div class="card-header">
+                        <h2>Realized P&L Growth</h2>
+                    </div>
+                    <div class="card-body chart-container">
+                        <canvas id="pnl-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT PANEL: SIGNAL FEED & ACTIVITY -->
+            <div class="grid-col col-right">
+                
+                <!-- SIGNALS CARD -->
+                <div class="card glass-card card-signals">
+                    <div class="card-header">
+                        <h2>Detected Signals</h2>
+                        <span class="feed-badge" id="signals-count">0 ACTIVE</span>
+                    </div>
+                    <div class="card-body signals-feed" id="signals-list">
+                        <div class="feed-empty">No trading signals detected yet. Scanner is scanning...</div>
+                    </div>
+                </div>
+
+                <!-- POSITIONS CARD -->
+                <div class="card glass-card card-positions">
+                    <div class="card-header">
+                        <h2>Open Positions</h2>
+                    </div>
+                    <div class="card-body table-responsive">
+                        <table class="terminal-table" id="positions-table">
+                            <thead>
+                                <tr>
+                                    <th>Market</th>
+                                    <th>Token</th>
+                                    <th>Side</th>
+                                    <th>Size</th>
+                                    <th>Avg Entry</th>
+                                    <th>Current</th>
+                                    <th>P&L</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td colspan="7" class="text-center">No open positions. Ready to execute signals.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- ORDERS CARD -->
+                <div class="card glass-card card-orders">
+                    <div class="card-header">
+                        <h2>Recent Orders & Trades</h2>
+                    </div>
+                    <div class="card-body table-responsive">
+                        <table class="terminal-table" id="orders-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Market</th>
+                                    <th>Side</th>
+                                    <th>Price</th>
+                                    <th>Size</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td colspan="6" class="text-center">No recent orders submitted yet.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+            </div>
+        </main>
+        
+        <!-- SYSTEM LOGS AUDIT TRAIL -->
+        <footer class="terminal-footer card glass-card">
+            <div class="card-header">
+                <h2>System Audit Log</h2>
+            </div>
+            <div class="audit-log-terminal" id="audit-log-list">
+                <div class="log-line text-muted">[SYSTEM] Core engine booted successfully. Ready.</div>
+            </div>
+        </footer>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

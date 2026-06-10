@@ -1,0 +1,25 @@
+[project]
+name = "polyagent"
+version = "0.1.0"
+description = "Multi-agent Polymarket trading backend"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.27.0",
+    "sqlalchemy>=2.0.0",
+    "aiosqlite>=0.20.0",
+    "pydantic-settings>=2.5.0",
+    "apscheduler>=3.10.0",
+    "py-clob-client>=0.1.0",
+    "python-telegram-bot>=21.0",
+    "openai>=1.50.0",
+    "websockets>=13.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24.0", "ruff>=0.6.0"]
+
+[tool.setuptools]
+packages = ["polyagent"]
+
